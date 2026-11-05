@@ -306,6 +306,19 @@ Run `deploy` again. Terraform makes no changes on the second run, and the smoke 
 Each run creates one smoke ticket titled `[smoke test] AI triage check <time>`. Close them from the agent
 workspace (search for `[smoke test]`, set Resolved), or leave them. Nothing else reads them.
 
+### 9. Seed the production tables (one time, already run for this deployment)
+
+The seed writes the demo tickets to the production tables. It refuses to run without `--production` and the
+matching `SEED_CONFIRM` value. Run it from `backend/` only if the tables must be re-seeded:
+
+```bash
+cd backend
+TABLE_TICKETS=helpdesk-pro-prod-tickets TABLE_COMMENTS=helpdesk-pro-prod-comments TABLE_USERS=helpdesk-pro-prod-users \
+AWS_REGION=us-east-1 SEED_CONFIRM=helpdesk-pro-prod python scripts/seed.py --production
+```
+
+This step has already been run once for this deployment, and it is not part of a normal deploy.
+
 ## Post-deploy verification
 
 1. **Workflow.** The smoke step ends with `smoke: PASS, triage_source=ai, ...`. A failure prints
@@ -376,8 +389,17 @@ The state bucket and lock table cost next to nothing at this size. A second depl
 2. **Anthropic model name.** `claude-haiku-5-5` is the default in `infra/variables.tf`. It has not been checked
    against the Anthropic account. Confirm it, or change `anthropic_model`. The workflow passes no override.
 3. **Anthropic billing and key.** Confirm the account has API billing, then run step 5.
-4. **First Admin.** Nothing in the app creates the first Admin. Add the first admin's user to the `Admin` group in
-   the Cognito console (or `aws cognito-idp admin-add-user-to-group`) after that user has signed in once.
+4. **First Admin.** Nothing in the app creates the first Admin, and no one can self-register. Someone with AWS admin
+   access creates the first Admin in pool `helpdesk-pro-prod-users`, with `POOL_ID` set to the `user_pool_id` output:
+
+   ```bash
+   aws cognito-idp admin-create-user --user-pool-id "$POOL_ID" --username "<ADMIN_EMAIL>" \
+     --user-attributes Name=email,Value="<ADMIN_EMAIL>" Name=email_verified,Value=true \
+     --message-action SUPPRESS --temporary-password "<TEMPORARY_PASSWORD>"
+   aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" --username "<ADMIN_EMAIL>" --group-name Admin
+   ```
+
+   The temporary password is shown in the CLI output and must be given to the new Admin directly (not by email). The new Admin signs in with it and must set a new password.
 5. **Notifications.** Set `NOTIFICATION_EMAIL` to subscribe an address to ticket events, or leave it empty.
 6. **Deploy role risk.** Accept in writing, or ask for a permissions boundary and a separate triage deploy path
    before the first deploy (see Security notes).

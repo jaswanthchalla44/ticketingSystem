@@ -1,8 +1,8 @@
 """Seed data: 4 agents, 1 admin, 5 customers and 25 tickets, with comments and timeline events.
 
 Idempotent. Ids are uuid5 from fixed names and timestamps are fixed, so a second run rewrites the same items.
-The local server runs seed() after it creates the local tables. Against real tables, run this script with
-TABLE_* set, and only with the person's approval.
+The local server runs seed() after it creates the local tables. The command line only runs against production
+tables, and only when every production check passes (see production_problems). Run it with the person's approval.
 """
 import os
 import sys
@@ -50,6 +50,17 @@ SEED_TICKETS = [
     ("Application license expired", "The design software says the license has expired even though we renewed it last week. Our team cannot work until this is fixed.", "Software", "In Progress", 3, 1, 7, 25),
     ("Thank you for the quick fix", "Thanks for fixing my password issue so fast. Everything works now, I appreciate the help!", "Login/Access", "Resolved", 4, 0, 400, 15),
 ]
+
+PRODUCTION_TABLE_PREFIX = "helpdesk-pro-prod-"
+PRODUCTION_REGION = "us-east-1"
+PRODUCTION_CONFIRM = "helpdesk-pro-prod"
+USAGE = (
+    "usage: python scripts/seed.py --production\n"
+    f"  Writes the seed data to the production tables. Needs TABLE_TICKETS, TABLE_COMMENTS and TABLE_USERS\n"
+    f"  named {PRODUCTION_TABLE_PREFIX}*, AWS_REGION (or AWS_DEFAULT_REGION) set to {PRODUCTION_REGION},\n"
+    f"  and SEED_CONFIRM={PRODUCTION_CONFIRM}.\n"
+    "  Without --production nothing is written. The local server calls seed() itself."
+)
 
 REPLY_BY_STATUS = {
     "In Progress": "Thanks for the details. We are working on this now and will update you soon.",
@@ -156,11 +167,42 @@ def _write_ticket(store, number, spec, customers, agents, manager):
         store.put_comment(entry)
 
 
-def main():
+def production_problems(env):
+    """Every reason the production seed must not run. An empty list means all checks passed."""
+    problems = []
+    for name in ("TABLE_TICKETS", "TABLE_COMMENTS", "TABLE_USERS"):
+        value = env.get(name, "").strip()
+        if not value:
+            problems.append(f"{name} is not set")
+        elif not value.startswith(PRODUCTION_TABLE_PREFIX):
+            problems.append(f"{name}={value} does not start with {PRODUCTION_TABLE_PREFIX}")
+    regions = {name: env[name].strip() for name in ("AWS_REGION", "AWS_DEFAULT_REGION") if env.get(name, "").strip()}
+    if not regions:
+        problems.append(f"AWS_REGION or AWS_DEFAULT_REGION must be set to {PRODUCTION_REGION}")
+    for name, value in regions.items():
+        if value != PRODUCTION_REGION:
+            problems.append(f"{name}={value} must be {PRODUCTION_REGION}")
+    if env.get("SEED_CONFIRM") != PRODUCTION_CONFIRM:
+        problems.append(f"SEED_CONFIRM must equal {PRODUCTION_CONFIRM} exactly")
+    return problems
+
+
+def main(argv=None):
+    args = sys.argv[1:] if argv is None else list(argv)
+    if args != ["--production"]:
+        print(USAGE, file=sys.stderr)
+        return 2
+    problems = production_problems(os.environ)
+    if problems:
+        print("refusing to seed production; nothing was written:", file=sys.stderr)
+        for problem in problems:
+            print(f"  - {problem}", file=sys.stderr)
+        return 1
     names = config.load_tables()
     store = Store(names.tickets_table, names.comments_table, names.users_table)
     print(f"seeded {seed(store)} tickets")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

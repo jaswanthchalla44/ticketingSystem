@@ -10,7 +10,7 @@ The app calls relative paths such as `/api/tickets`.
 - Send the Cognito **ID token** as `Authorization: Bearer <id token>`. API Gateway checks the signature, issuer,
   expiry and audience (the `helpdesk-pro-prod-web` client). An access token is refused by the gateway.
 - The role comes from the Cognito group in the token: `Admin`, `Agent` or `Customer`. A user with no group
-  (self sign-up) is a `Customer`. When several groups are present, the highest wins (`Admin` > `Agent` > `Customer`).
+  (an account created by an admin, which asks for a new password at first sign-in) is a `Customer`. When several groups are present, the highest wins (`Admin` > `Agent` > `Customer`).
 - A role change made by an admin takes effect at the user's next token refresh (up to 60 minutes).
 - Local preview only (`AUTH_MODE=local`): send `X-Dev-User` with a seeded user's email or sub instead of a token.
 
@@ -212,7 +212,7 @@ only the first 5000 rows.
 ### GET /api/users
 Role: Admin. **200** `{"items": [{"user_id", "name", "email", "role", "created_at"}]}`
 
-Lists users who have signed in at least once (the user cache). A new self sign-up appears after their first request.
+Lists users who have signed in at least once (the user cache). Accounts are created by an admin (self sign-up is off), and a new account appears after its user's first request (the first sign-in requires a new password).
 
 ### PATCH /api/users/{sub}
 Role: Admin. Body: `{"role": "Customer" | "Agent" | "Admin"}`. **200** the user object.
