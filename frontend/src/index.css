@@ -1,0 +1,68 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Colour tokens are RGB triplets so Tailwind opacity modifiers work. Light is the default; dark is selected by
+   the theme toggle (data-theme) and set before first paint in index.html. Values come from the dataviz palette:
+   categorical blue (slot 1), status colours (good, warning, serious, critical) and the chart surfaces. */
+:root {
+  color-scheme: light;
+  --page: 249 249 247;
+  --surface: 252 252 251;
+  --ink: 11 11 11;
+  --ink-2: 82 81 78;
+  --ink-3: 107 106 102;
+  --line: 225 224 217;
+  --brand: 42 120 214;
+  --brand-ink: 255 255 255;
+  --series-1: 42 120 214;
+  --good: 12 163 12;
+  --warning: 250 178 25;
+  --serious: 236 131 90;
+  --critical: 208 59 59;
+  --critical-text: 180 40 40;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --page: 13 13 13;
+  --surface: 26 26 25;
+  --ink: 240 239 236;
+  --ink-2: 195 194 183;
+  --ink-3: 163 162 155;
+  --line: 44 44 42;
+  --brand: 57 135 229;
+  --brand-ink: 11 11 11;
+  --series-1: 57 135 229;
+  --good: 12 163 12;
+  --warning: 250 178 25;
+  --serious: 236 131 90;
+  --critical: 208 59 59;
+  --critical-text: 240 130 130;
+}
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    min-height: 100dvh;
+    overflow-x: hidden;
+  }
+  :focus-visible {
+    outline: 2px solid rgb(var(--brand));
+    outline-offset: 2px;
+  }
+}
+
+/* Respect the operating system's reduced-motion setting everywhere, including Tailwind's animate-* classes. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

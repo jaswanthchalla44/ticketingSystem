@@ -1,0 +1,250 @@
+# Manual deploy only. Nothing runs on push or pull request.
+name: deploy
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Required for AWS OIDC login (configure-aws-credentials) in both jobs.
+  id-token: write
+
+# One deploy at a time. Never cancel a run that is mid-apply.
+concurrency:
+  group: helpdesk-pro-prod-deploy
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_VERSION: 1.17.0
+
+jobs:
+  # Job 1: no GitHub environment, so it runs without waiting for approval. It only reads state and
+  # writes the plan. Nothing is changed in AWS here.
+  plan:
+    name: Plan helpdesk-pro-prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # The state bucket name carries the account ID, so read it after OIDC login.
+      - name: Resolve AWS account ID
+        id: account
+        run: echo "account_id=$(aws sts get-caller-identity --query Account --output text)" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform init
+        working-directory: infra
+        env:
+          TF_STATE_BUCKET: helpdesk-pro-prod-tfstate-${{ steps.account.outputs.account_id }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=helpdesk-pro-prod/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=helpdesk-pro-prod-tflock" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform plan (saved)
+        working-directory: infra
+        env:
+          TF_VAR_notification_email: ${{ vars.NOTIFICATION_EMAIL }}
+        run: terraform plan -input=false -no-color -out=tfplan
+
+      # The plan text goes to the job summary so the reviewer can read it before approving the
+      # apply job. Sensitive values are masked by Terraform, and the summary is cut to fit
+      # GitHub's 1 MiB limit. The summary never contains the saved plan file.
+      - name: Write plan summary
+        working-directory: infra
+        run: |
+          plan_text="${RUNNER_TEMP}/tfplan.txt"
+          terraform show -no-color tfplan > "${plan_text}"
+          {
+            echo "## Terraform plan (the apply job applies this saved plan after approval)"
+            echo ""
+            echo '```terraform'
+            head -c 900000 "${plan_text}"
+            echo ""
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      # SENSITIVE ARTIFACT. The saved plan file can hold values in clear text (unlike the masked
+      # text output above). Anyone with read access to this repository's runs can download it,
+      # so it is kept for one day only. Do not add state, .terraform or provider files to this path.
+      - name: Upload saved plan (sensitive, 1-day retention)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tfplan
+          path: infra/tfplan
+          if-no-files-found: error
+          retention-days: 1
+
+  # Job 2: waits for the production environment approval, then applies the saved plan from job 1.
+  apply:
+    name: Apply and publish helpdesk-pro-prod
+    needs: plan
+    runs-on: ubuntu-latest
+    # Attach required reviewers to this GitHub environment so a human approves each apply.
+    environment: production
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # The state bucket name carries the account ID, so read it after OIDC login.
+      - name: Resolve AWS account ID
+        id: account
+        run: echo "account_id=$(aws sts get-caller-identity --query Account --output text)" >> "$GITHUB_OUTPUT"
+
+      # Init is needed here too: apply and the output reads below use the remote state.
+      - name: Terraform init
+        working-directory: infra
+        env:
+          TF_STATE_BUCKET: helpdesk-pro-prod-tfstate-${{ steps.account.outputs.account_id }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="key=helpdesk-pro-prod/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=helpdesk-pro-prod-tflock" \
+            -backend-config="encrypt=true"
+
+      # Downloaded after checkout so the checkout cannot remove it. Same run, so same commit.
+      - name: Download saved plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tfplan
+          path: infra
+
+      # Applies only the saved plan. Terraform refuses it if the state changed since the plan.
+      - name: Terraform apply (saved plan)
+        working-directory: infra
+        run: terraform apply -input=false tfplan
+
+      - name: Read Terraform outputs
+        id: tf
+        working-directory: infra
+        run: |
+          echo "deployed_url=$(terraform output -raw deployed_url)" >> "$GITHUB_OUTPUT"
+          echo "frontend_bucket=$(terraform output -raw frontend_bucket)" >> "$GITHUB_OUTPUT"
+          echo "distribution_id=$(terraform output -raw cloudfront_distribution_id)" >> "$GITHUB_OUTPUT"
+          echo "user_pool_id=$(terraform output -raw user_pool_id)" >> "$GITHUB_OUTPUT"
+          echo "user_pool_client_id=$(terraform output -raw user_pool_client_id)" >> "$GITHUB_OUTPUT"
+          echo "smoke_user_pool_client_id=$(terraform output -raw smoke_user_pool_client_id)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # Production build is always the Cognito build. No local-mode variables are set here.
+      - name: Build frontend (Cognito auth)
+        working-directory: frontend
+        env:
+          VITE_AUTH_MODE: cognito
+          VITE_COGNITO_REGION: ${{ env.AWS_REGION }}
+          VITE_COGNITO_USER_POOL_ID: ${{ steps.tf.outputs.user_pool_id }}
+          VITE_COGNITO_CLIENT_ID: ${{ steps.tf.outputs.user_pool_client_id }}
+        run: |
+          npm ci
+          npm run build
+
+          # The local-only dev header and demo accounts must not be in the production bundle.
+          if grep -rq -e 'X-Dev-User' -e 'example.test' dist; then
+            echo "::error::local-mode code found in the build: VITE_AUTH_MODE must be cognito"
+            exit 1
+          fi
+          if ! grep -rq 'cognito-idp' dist; then
+            echo "::error::Cognito client code missing from the build"
+            exit 1
+          fi
+
+      - name: Upload frontend (hashed assets immutable, index.html revalidated)
+        env:
+          BUCKET: ${{ steps.tf.outputs.frontend_bucket }}
+        run: |
+          aws s3 sync frontend/dist "s3://${BUCKET}/" --delete \
+            --exclude index.html \
+            --cache-control "public, max-age=31536000, immutable"
+          aws s3 cp frontend/dist/index.html "s3://${BUCKET}/index.html" \
+            --cache-control "no-cache, must-revalidate"
+
+      - name: Invalidate CloudFront
+        env:
+          DISTRIBUTION_ID: ${{ steps.tf.outputs.distribution_id }}
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${DISTRIBUTION_ID}" \
+            --paths "/*"
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      # Post-deploy smoke test: signs in as the smoke customer, creates a ticket through the
+      # live API and requires AI triage (triage_source == "ai"). The ID token is masked and
+      # never printed. The sign-in request body goes through a 0600 temp file, not argv.
+      # See "One-time steps" in docs/ARCHITECTURE.md for the smoke user and its secrets.
+      - name: Smoke test (AI triage)
+        env:
+          SMOKE_BASE_URL: ${{ steps.tf.outputs.deployed_url }}
+          SMOKE_CLIENT_ID: ${{ steps.tf.outputs.smoke_user_pool_client_id }}
+          SMOKE_USER_EMAIL: ${{ secrets.SMOKE_USER_EMAIL }}
+          SMOKE_USER_PASSWORD: ${{ secrets.SMOKE_USER_PASSWORD }}
+        run: |
+          if [ -z "${SMOKE_USER_EMAIL}" ] || [ -z "${SMOKE_USER_PASSWORD}" ]; then
+            echo "::error::SMOKE_USER_EMAIL and SMOKE_USER_PASSWORD must be set as production environment secrets"
+            exit 1
+          fi
+
+          auth_file="$(mktemp)"
+          trap 'rm -f "${auth_file}"' EXIT
+          jq -n --arg user "${SMOKE_USER_EMAIL}" --arg pass "${SMOKE_USER_PASSWORD}" \
+            '{USERNAME: $user, PASSWORD: $pass}' > "${auth_file}"
+
+          if ! response="$(aws cognito-idp initiate-auth \
+              --auth-flow USER_PASSWORD_AUTH \
+              --client-id "${SMOKE_CLIENT_ID}" \
+              --auth-parameters "file://${auth_file}" \
+              --output json)"; then
+            echo "::error::smoke sign-in request failed (check the smoke user and its permanent password)"
+            exit 1
+          fi
+
+          id_token="$(jq -r '.AuthenticationResult.IdToken // empty' <<< "${response}")"
+          if [ -z "${id_token}" ]; then
+            echo "::error::smoke sign-in returned no ID token (a pending challenge means the password is still temporary)"
+            exit 1
+          fi
+          echo "::add-mask::${id_token}"
+
+          export SMOKE_ID_TOKEN="${id_token}"
+          python3 backend/scripts/smoke_triage.py
