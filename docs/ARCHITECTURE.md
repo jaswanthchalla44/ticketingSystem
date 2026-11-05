@@ -197,7 +197,7 @@ workspace (search for `[smoke test]`, set status to Resolved), or leave them. No
 
 | Resource (Terraform) | Name | Purpose |
 |---|---|---|
-| `aws_cognito_user_pool.users` | `helpdesk-pro-prod-users` | User directory, email sign-in, deletion protection on. |
+| `aws_cognito_user_pool.users` | `helpdesk-pro-prod-users` | User directory, email sign-in, admin-created accounts only (self sign-up off), deletion protection on. |
 | `aws_cognito_user_pool_client.web` | `helpdesk-pro-prod-web` | SPA client: SRP sign-in and refresh tokens, no client secret. Users can write `email` only; `name` is admin-managed. |
 | `aws_cognito_user_pool_client.smoke` | `helpdesk-pro-prod-smoke` | Deploy smoke test only: password sign-in and refresh, no client secret, 60-minute ID and access tokens, 1-day refresh. The only client that allows `USER_PASSWORD_AUTH`. Users can write `email` only. |
 | `aws_cognito_user_group.customer` | `Customer` | Role: sees only own tickets. |
